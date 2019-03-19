@@ -10,6 +10,7 @@ notifiers:
 package stub
 
 import (
+	"encoding/json"
 	"os"
 
 	config "github.com/micro/go-config"
@@ -32,14 +33,15 @@ type GeneralConfig struct {
 }
 
 type AnnotationConfig struct {
-	Status       string `json:"status"`
-	StatusReason string `json:"status-reason"`
-	Expiry       string `json:"expiry"`
-	Format       string `json:"format"`
+	Status        string `json:"status"`
+	StatusReason  string `json:"status-reason"`
+	Expiry        string `json:"expiry"`
+	Format        string `json:"format"`
+	NeedCertValue string `json:"need-cert-value"`
 }
 
 const (
-	defaultConfigFile = "/etc/cert-operator/config.yml"
+	defaultConfigFile = "/etc/cert-operator/config.yaml"
 	defaultProvider   = "self-signed"
 	defaultConfig     = `
   {
@@ -48,11 +50,13 @@ const (
         "status": "openshift.io/cert-ctl-status",
         "status-reason": "openshift.io/cert-ctl-status-reason",
         "expiry": "openshift.io/cert-ctl-expires",
-        "format": "openshift.io/cert-ctl-format"
+        "format": "openshift.io/cert-ctl-format",
+				"need-cert-value": "new"
       }
     },
     "provider": {
-      "kind": "none"
+      "kind": "none",
+      "ssl": "false"
     }
   }`
 )
@@ -79,31 +83,22 @@ func NewConfig() Config {
 
 	tmpConfig.Scan(&conf)
 
-	// if conf.Notifiers == nil {
-	// 	panic("Notifiers should not be empty")
-	// }
-	//
-	// for index, n := range conf.Notifiers {
-	// 	logrus.Infof("Found notifier: " + string(index) + "=" + n.Name)
-	// }
-
 	return conf
 }
 
 func getConfigFile() (configFile string) {
 	if value, ok := os.LookupEnv("CERT_OP_CONFIG"); ok {
-		logrus.Infof("Loading config file from %v", value)
+		logrus.Infof("Loading custom config file from %v", value)
 		return value
 	}
-	logrus.Infof("Loading config file from %v", defaultConfigFile)
+	logrus.Infof("Loading default config file from %v", defaultConfigFile)
 	return defaultConfigFile
 }
 
 func (c *Config) String() string {
-	var s string
-	// for _, element := range c.Notifiers {
-	// 	s += element.Name() + "\n"
-	// }
-	s += c.Provider.Kind
-	return s
+	out, err := json.Marshal(c)
+	if err != nil {
+		panic(err)
+	}
+	return string(out)
 }

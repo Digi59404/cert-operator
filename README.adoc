@@ -5,7 +5,7 @@ toc::[]
 
 == Prerequisites
 
-* link:https://github.com/operator-framework/operator-sdk[Operator SDK]
+* link:https://github.com/operator-framework/operator-sdk/tree/v0.0.6[Operator SDK v0.0.6]
 * link:https://golang.github.io/dep/docs/installation.html[Dep]
 
 == Installation
@@ -21,7 +21,9 @@ dep ensure
 [source,bash]
 ----
 oc login ...
-oc apply -f deploy/rbac.yaml -n operators
+oc new-project cert-operator
+oc process -f deploy/rbac.yaml -p NAMESPACE=cert-operator | oc apply -f-
+export OPERATOR_NAME=cert-operator
 operator-sdk up local
 ----
 
@@ -29,10 +31,9 @@ operator-sdk up local
 
 [source,bash]
 ----
-operator-sdk build quay.io/etsauer/cert-operator
-docker push quay.io/etsauer/cert-operator
-oc apply -f deploy/rbac.yaml -n operators
-oc apply -f deploy/operator.yaml -n operators
+oc process -f build/build.yml | oc apply -f-
+oc process -f deploy/rbac.yaml -p NAMESPACE=cert-operator | oc apply -f-
+oc apply -f deploy/deployment.yaml
 ----
 
 == Configuration
@@ -65,7 +66,7 @@ The cert operator provides a pluggable architecture for supporting multiple cert
 * [x] SelfSignedProvider(`self-signed`) - Delivers self-signed certificates
 * [ ] LetsEncryptProvider(`lets-encrpyt`) - A free and open public CA
 * [ ] FreeIPAProvider(`ipa`) - An open source identity management system
-* [ ] VenafiProvider(`venafi`) - An Enterprise PKI product
+* [X] VenafiProvider(`venafi`) - An Enterprise PKI product
 
 Configuring which provider is used is a matter of adding the following to your config.yml:
 
@@ -73,6 +74,7 @@ Configuring which provider is used is a matter of adding the following to your c
 ----
 provider:
   kind: <name>
+  ssl: <true/false>
 ----
 
 === Notifications

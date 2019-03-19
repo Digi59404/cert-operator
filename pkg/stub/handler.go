@@ -20,17 +20,27 @@ const (
 
 func NewHandler(config Config) sdk.Handler {
 	var provider certs.Provider
+
+	if config.Provider.Ssl == "true" {
+		logrus.Infof("SSL Verified")
+	} else {
+		logrus.Infof("SSL Not Verified")
+	}
+
 	switch config.Provider.Kind {
 	case "none":
+		logrus.Infof("None provider.")
 		provider = new(certs.NoneProvider)
 	case "self-signed":
+		logrus.Infof("Self Signed provider.")
 		provider = new(certs.SelfSignedProvider)
 	case "venafi":
 		logrus.Infof("Venafi Cert provider.")
 		provider = new(certs.VenafiProvider)
 	default:
-		panic("There was a problem detecting which provider to configure. " +
-			"Provider kind `" + config.Provider.Kind + "` is invalid.")
+		panic("There was a problem detecting which provider to configure. \n" +
+			"\tProvider kind `" + config.Provider.Kind + "` is invalid. \n" +
+			config.String())
 	}
 	return &Handler{
 		config:   config,
@@ -61,7 +71,7 @@ func (h *Handler) handleRoute(route *v1.Route) error {
 		return nil
 	}
 
-	if route.ObjectMeta.Annotations[h.config.General.Annotations.Status] == "new" {
+	if route.ObjectMeta.Annotations[h.config.General.Annotations.Status] == h.config.General.Annotations.NeedCertValue {
 		// Notfiy of certificate awaiting creation
 		logrus.Infof("Found a route waiting for a cert : %v/%v",
 			route.ObjectMeta.Namespace,
@@ -73,18 +83,37 @@ func (h *Handler) handleRoute(route *v1.Route) error {
 		h.notify(message)
 
 		// Retreive cert from provider
-		keyPair := h.getCert(route.Spec.Host)
+		keyPair, err := h.getCert(route.Spec.Host)
 
 		var routeCopy *v1.Route
 		routeCopy = route.DeepCopy()
-		routeCopy.ObjectMeta.Annotations[h.config.General.Annotations.Status] = "no"
-		routeCopy.ObjectMeta.Annotations[h.config.General.Annotations.Expiry] = keyPair.Expiry.Format(timeFormat)
-		routeCopy.Spec.TLS = &v1.TLSConfig{
-			Termination: v1.TLSTerminationEdge,
-			Certificate: string(keyPair.Cert),
-			Key:         string(keyPair.Key),
+		if err != nil {
+			routeCopy.ObjectMeta.Annotations[h.config.General.Annotations.Status] = "failed"
+			routeCopy.ObjectMeta.Annotations[h.config.General.Annotations.StatusReason] = err.Error()
+		} else {
+			routeCopy.ObjectMeta.Annotations[h.config.General.Annotations.Status] = "secured"
 		}
-		updateRoute(routeCopy)
+		routeCopy.ObjectMeta.Annotations[h.config.General.Annotations.Expiry] = keyPair.Expiry.Format(timeFormat)
+
+		config := routeCopy.Spec.TLS
+		if config == nil {
+			// Create new basic TLS Config
+			routeCopy.Spec.TLS = &v1.TLSConfig{
+				Termination: v1.TLSTerminationEdge,
+				Certificate: string(keyPair.Cert),
+				Key:         string(keyPair.Key),
+			}
+		} else {
+			// TLS Config already exists, so we'll just inject a new Cert & Key
+			routeCopy.Spec.TLS.Certificate = string(keyPair.Cert)
+			routeCopy.Spec.TLS.Key = string(keyPair.Key)
+		}
+
+		err = apply(routeCopy)
+
+		if err != nil {
+			logrus.Errorf("Error handling route: %s", err.Error())
+		}
 
 		logrus.Infof("Updated route %v/%v with new certificate",
 			route.ObjectMeta.Namespace,
@@ -98,7 +127,7 @@ func (h *Handler) handleService(service *corev1.Service) error {
 		return nil
 	}
 
-	if service.ObjectMeta.Annotations[h.config.General.Annotations.Status] == "new" {
+	if service.ObjectMeta.Annotations[h.config.General.Annotations.Status] == h.config.General.Annotations.NeedCertValue {
 		logrus.Infof("Found a service waiting for a cert : %v/%v",
 			service.ObjectMeta.Namespace,
 			service.ObjectMeta.Name)
@@ -109,13 +138,19 @@ func (h *Handler) handleService(service *corev1.Service) error {
 
 		h.notify(message)
 
-		host := service.ObjectMeta.Name + "." + service.ObjectMeta.Namespace + ".svc.cluster.local"
+		host := service.ObjectMeta.Name + "." + service.ObjectMeta.Namespace + ".svc"
 
 		// Retreive cert from provider
-		keyPair := h.getCert(host)
+		keyPair, err := h.getCert(host)
+
+		if err != nil {
+			logrus.Errorf(err.Error())
+		}
 
 		var svcCopy *corev1.Service
 		svcCopy = service.DeepCopy()
+		svcCopy.ObjectMeta.Annotations[h.config.General.Annotations.Status] = "secured"
+		svcCopy.ObjectMeta.Annotations[h.config.General.Annotations.Expiry] = keyPair.Expiry.Format(timeFormat)
 
 		dm := make(map[string][]byte)
 		dm["app.crt"] = keyPair.Cert
@@ -134,30 +169,26 @@ func (h *Handler) handleService(service *corev1.Service) error {
 			Data: dm,
 		}
 
-		err := sdk.Create(certSec)
+		err = apply(certSec)
+
 		if err != nil {
-			logrus.Errorf("Failed to create secret: " + err.Error())
-			return err
+			logrus.Errorf("Error handling secret: %s", err.Error())
 		}
 
 		logrus.Infof("Provisioned new secret %s/%s containing certificate",
 			certSec.ObjectMeta.Namespace,
 			certSec.ObjectMeta.Name)
 
-		// Update service annotations
-		svcCopy.ObjectMeta.Annotations[h.config.General.Annotations.Status] = "no"
-		svcCopy.ObjectMeta.Annotations[h.config.General.Annotations.Expiry] = keyPair.Expiry.Format(timeFormat)
+		err = apply(svcCopy)
 
-		err = sdk.Update(svcCopy)
 		if err != nil {
-			logrus.Errorf("Failed to update service: " + err.Error())
-			return err
+			logrus.Errorf("Error handling service: %s", err.Error())
 		}
 
 		logrus.Infof("Updated service %v/%v with new certificate",
 			service.ObjectMeta.Namespace,
 			service.ObjectMeta.Name)
-	}
+	}		
 	return nil
 }
 
@@ -179,7 +210,7 @@ func (h *Handler) notify(message string) {
 	}
 }
 
-func (h *Handler) getCert(host string) certs.KeyPair {
+func (h *Handler) getCert(host string) (certs.KeyPair, error) {
 	oneYear, timeErr := time.ParseDuration("8760h")
 	if timeErr != nil {
 		logrus.Errorf("Failed to parse time duratio during getCert: " + timeErr.Error())
@@ -189,17 +220,22 @@ func (h *Handler) getCert(host string) certs.KeyPair {
 	keyPair, err := h.provider.Provision(
 		host,
 		time.Now().Format(timeFormat),
-		oneYear, false, 2048, "")
+		oneYear, false, 2048, "", h.config.Provider.Ssl)
 	if err != nil {
 		logrus.Errorf("Failed to provision key pair: " + err.Error())
+		return keyPair, err
 	}
-	return keyPair
+	return keyPair, nil
 }
 
-// update route def
-func updateRoute(route *v1.Route) error {
-
-	err := sdk.Update(route)
-
-	return err
+func apply(object sdk.Object) error {
+	err := sdk.Create(object)
+	if(err != nil) {
+		err = sdk.Update(object)
+		if err != nil {
+			return err
+		}
+		return nil;
+	}
+	return nil
 }
